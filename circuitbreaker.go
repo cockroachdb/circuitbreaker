@@ -302,7 +302,7 @@ func (cb *Breaker) Success() {
 	cb.backoffLock.Unlock()
 
 	state := cb.state()
-	if state == halfopen {
+	if state != closed {
 		cb.Reset()
 	}
 	atomic.StoreInt64(&cb.consecFailures, 0)
