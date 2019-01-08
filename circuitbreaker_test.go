@@ -518,3 +518,30 @@ func TestPartialSecondBackoff(t *testing.T) {
 		t.Fatalf("expected breaker to be ready after more than nextBackoff time had passed")
 	}
 }
+
+func TestLogger(t *testing.T) {
+	b := NewBreakerWithOptions(&Options{
+		Name:   "foo",
+		Logger: &testLogger{},
+	})
+	b.Reset()
+	b.Fail()
+}
+
+type logCall struct {
+	format string
+	args   []interface{}
+}
+
+type testLogger struct {
+	infoCalls  []logCall
+	debugCalls []logCall
+}
+
+func (l *testLogger) Infof(format string, args ...interface{}) {
+	l.infoCalls = append(l.infoCalls, logCall{format, args})
+}
+
+func (l *testLogger) Debugf(format string, args ...interface{}) {
+	l.debugCalls = append(l.debugCalls, logCall{format, args})
+}
