@@ -3,6 +3,7 @@ package circuit
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -583,4 +584,44 @@ func TestNoDeadlockOnChannelSends(t *testing.T) {
 		go tripAndReset()
 	}
 	wg.Wait()
+}
+
+// TestLogger ensures that the name and events get logged to the logger with at
+// the expected level.
+func TestLogger(t *testing.T) {
+	l := &testLogger{}
+	name := "foo"
+	b := NewBreakerWithOptions(&Options{
+		Name:   name,
+		Logger: l,
+	})
+	b.Reset()
+	b.Fail()
+	verifyLogCall := func(calls []logCall, idx int, expectedArgs ...interface{}) {
+		if len(calls) < idx+1 {
+			t.Errorf("expected at least %d log calls but only have %d", idx+1, len(calls))
+		} else if !reflect.DeepEqual(calls[idx].args, expectedArgs) {
+			t.Errorf("expected logging to have been called with %v, got %v", expectedArgs, calls[idx].args)
+		}
+	}
+	verifyLogCall(l.infoCalls, 0, name, BreakerReset)
+	verifyLogCall(l.debugCalls, 0, name, BreakerFail)
+}
+
+type logCall struct {
+	format string
+	args   []interface{}
+}
+
+type testLogger struct {
+	infoCalls  []logCall
+	debugCalls []logCall
+}
+
+func (l *testLogger) Infof(format string, args ...interface{}) {
+	l.infoCalls = append(l.infoCalls, logCall{format, args})
+}
+
+func (l *testLogger) Debugf(format string, args ...interface{}) {
+	l.debugCalls = append(l.debugCalls, logCall{format, args})
 }

@@ -41,6 +41,15 @@ import (
 	"github.com/facebookgo/clock"
 )
 
+// Logger allows clients to receive debugging information from circuit breakers
+// via logs.
+type Logger interface {
+	// Debugf is used to log BreakerFail events
+	Debugf(format string, v ...interface{})
+	// Infof is used to log BreakerTripped, BreakerReset, and BreakerReady events.
+	Infof(format string, v ...interface{})
+}
+
 // BreakerEvent indicates the type of event received over an event channel
 type BreakerEvent int
 
@@ -115,6 +124,8 @@ type Breaker struct {
 	eventReceivers []chan BreakerEvent
 	listeners      []chan ListenerEvent
 	backoffLock    sync.Mutex
+	logger         Logger
+	name           string
 }
 
 // Options holds breaker configuration options.
@@ -124,6 +135,11 @@ type Options struct {
 	ShouldTrip    TripFunc
 	WindowTime    time.Duration
 	WindowBuckets int
+
+	// Logger is used to log when events occur.
+	Logger Logger
+	// Name is used with Logger if Logger is non-nil.
+	Name string
 }
 
 // NewBreakerWithOptions creates a base breaker with a specified backoff, clock and TripFunc
@@ -159,6 +175,8 @@ func NewBreakerWithOptions(options *Options) *Breaker {
 		ShouldTrip:  options.ShouldTrip,
 		nextBackOff: options.BackOff.NextBackOff(),
 		counts:      newWindow(options.WindowTime, options.WindowBuckets),
+		logger:      options.Logger,
+		name:        options.Name,
 	}
 }
 
@@ -409,7 +427,20 @@ func (cb *Breaker) state() state {
 	return closed
 }
 
+func (cb *Breaker) logEvent(event BreakerEvent) {
+	if cb.logger == nil {
+		return
+	}
+	switch event {
+	case BreakerTripped, BreakerReset, BreakerReady:
+		cb.logger.Infof("circuitbreaker: %v %v", cb.name, event)
+	default:
+		cb.logger.Debugf("circuitbreaker: %v %v", cb.name, event)
+	}
+}
+
 func (cb *Breaker) sendEvent(event BreakerEvent) {
+	cb.logEvent(event)
 	for _, receiver := range cb.eventReceivers {
 		receiver <- event
 	}
