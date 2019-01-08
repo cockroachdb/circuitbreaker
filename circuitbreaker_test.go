@@ -3,6 +3,7 @@ package circuit
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -517,4 +518,69 @@ func TestPartialSecondBackoff(t *testing.T) {
 	if !cb.Ready() {
 		t.Fatalf("expected breaker to be ready after more than nextBackoff time had passed")
 	}
+}
+
+// TestNoDeadlockOnChannelSends ensures that the behavior of channel sends in
+// the face of concurrent events and consumers does not lead to deadlock.
+func TestNoDeadlockOnChannelSends(t *testing.T) {
+	const listeners = 1000
+	const subscribers = 1000
+	const resetters = 3
+	b := NewBreakerWithOptions(nil)
+	var lcs []chan ListenerEvent
+	for i := 0; i < listeners; i++ {
+		lcs = append(lcs, make(chan ListenerEvent, 1))
+		b.AddListener(lcs[i])
+	}
+	var scs []<-chan BreakerEvent
+	for i := 0; i < subscribers; i++ {
+		scs = append(scs, b.Subscribe())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	readFromSubscribeChan := func(sc <-chan BreakerEvent) {
+		defer wg.Done()
+		for {
+			select {
+			case <-sc:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	readFromListenerChan := func(lc chan ListenerEvent) {
+		defer wg.Done()
+		for {
+			select {
+			case <-lc:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+	tripAndReset := func() {
+		defer wg.Done()
+		for i := 0; true; i++ {
+			// Keep sending a bit after the other goroutine exits.
+			if i%1000 == 0 && ctx.Err() != nil {
+				return
+			}
+			b.Reset()
+			b.Trip()
+		}
+	}
+	for _, lc := range lcs {
+		wg.Add(1)
+		go readFromListenerChan(lc)
+	}
+	for _, sc := range scs {
+		wg.Add(1)
+		go readFromSubscribeChan(sc)
+	}
+	for i := 0; i < resetters; i++ {
+		wg.Add(1)
+		go tripAndReset()
+	}
+	wg.Wait()
 }

@@ -190,17 +190,22 @@ func NewRateBreaker(rate float64, minSamples int64) *Breaker {
 
 // Subscribe returns a channel of BreakerEvents. Whenever the breaker changes state,
 // the state will be sent over the channel. See BreakerEvent for the types of events.
+// Note that events may be dropped or not sent so clients should not rely on
+// events for program correctness.
 func (cb *Breaker) Subscribe() <-chan BreakerEvent {
 	eventReader := make(chan BreakerEvent)
 	output := make(chan BreakerEvent, 100)
-
 	go func() {
 		for v := range eventReader {
+		trySend:
 			select {
 			case output <- v:
 			default:
-				<-output
-				output <- v
+				select {
+				case <-output:
+				default:
+				}
+				goto trySend
 			}
 		}
 	}()
@@ -210,6 +215,8 @@ func (cb *Breaker) Subscribe() <-chan BreakerEvent {
 
 // AddListener adds a channel of ListenerEvents on behalf of a listener.
 // The listener channel must be buffered.
+// Note that events may be dropped or not sent so clients should not rely on
+// events for program correctness.
 func (cb *Breaker) AddListener(listener chan ListenerEvent) {
 	cb.listeners = append(cb.listeners, listener)
 }
@@ -336,7 +343,9 @@ func (cb *Breaker) Call(circuit func() error, timeout time.Duration) error {
 
 // CallContext is same as Call but if the ctx is canceled after the circuit returned an error,
 // the error will not be marked as a failure because the call was canceled intentionally.
-func (cb *Breaker) CallContext(ctx context.Context, circuit func() error, timeout time.Duration) error {
+func (cb *Breaker) CallContext(
+	ctx context.Context, circuit func() error, timeout time.Duration,
+) error {
 	var err error
 
 	if !cb.Ready() {
@@ -406,11 +415,16 @@ func (cb *Breaker) sendEvent(event BreakerEvent) {
 	}
 	for _, listener := range cb.listeners {
 		le := ListenerEvent{CB: cb, Event: event}
+	trySend:
 		select {
 		case listener <- le:
 		default:
-			<-listener
-			listener <- le
+			// The channel was full so attempt to pull off of it and send again.
+			select {
+			case <-listener:
+			default:
+			}
+			goto trySend
 		}
 	}
 }
