@@ -2,12 +2,11 @@ package circuit
 
 import (
 	"fmt"
-
-	"github.com/peterbourgon/g2s"
-
 	"io/ioutil"
 	"log"
 	"time"
+
+	"github.com/peterbourgon/g2s"
 )
 
 func ExampleNewThresholdBreaker() {
@@ -29,7 +28,7 @@ func ExampleNewThresholdBreaker_manual() {
 	if breaker.Ready() {
 		err := remoteCall()
 		if err != nil {
-			breaker.Fail()
+			breaker.Fail(nil)
 			log.Fatal(err)
 		} else {
 			breaker.Success()
@@ -100,7 +99,7 @@ func ExampleBreaker_events() {
 		}
 	}()
 
-	breaker.Fail()
+	breaker.Fail(nil)
 	breaker.Reset()
 }
 
@@ -141,10 +140,10 @@ func ExamplePanel_stats() {
 	panel.StatsPrefixf = "sys.production.%s"
 	panel.Add("x", breaker)
 
-	breaker.Trip()  // sys.production.circuit.x.tripped
-	breaker.Reset() // sys.production.circuit.x.reset, sys.production.circuit.x.trip-time
-	breaker.Fail()  // sys.production.circuit.x.fail
-	breaker.Ready() // sys.production.circuit.x.ready (if it's tripped and ready to retry)
+	breaker.Trip()    // sys.production.circuit.x.tripped
+	breaker.Reset()   // sys.production.circuit.x.reset, sys.production.circuit.x.trip-time
+	breaker.Fail(nil) // sys.production.circuit.x.fail
+	breaker.Ready()   // sys.production.circuit.x.ready (if it's tripped and ready to retry)
 }
 
 func remoteCall() error {

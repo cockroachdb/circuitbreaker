@@ -43,7 +43,7 @@ func TestPanelStats(t *testing.T) {
 	rb := NewBreaker()
 	p.Add("breaker", rb)
 
-	rb.Fail()
+	rb.Fail(nil)
 	rb.Trip()
 	time.Sleep(rb.nextBackOff)
 	rb.Ready()
