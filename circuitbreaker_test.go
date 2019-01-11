@@ -38,12 +38,12 @@ func TestBreakerTripping(t *testing.T) {
 func TestBreakerCounts(t *testing.T) {
 	cb := NewBreaker()
 
-	cb.Fail()
+	cb.Fail(nil)
 	if failures := cb.Failures(); failures != 1 {
 		t.Fatalf("expected failure count to be 1, got %d", failures)
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	if consecFailures := cb.ConsecFailures(); consecFailures != 2 {
 		t.Fatalf("expected 2 consecutive failures, got %d", consecFailures)
 	}
@@ -97,7 +97,7 @@ func TestBreakerEvents(t *testing.T) {
 		t.Fatalf("expected to receive a reset event, got %d", e)
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	if e := <-events; e != BreakerFail {
 		t.Fatalf("expected to receive a fail event, got %d", e)
 	}
@@ -126,7 +126,7 @@ func TestAddRemoveListener(t *testing.T) {
 		t.Fatalf("expected to receive a reset event, got %v", e)
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	if e := <-events; e.Event != BreakerFail {
 		t.Fatalf("expected to receive a fail event, got %v", e)
 	}
@@ -159,7 +159,7 @@ func TestTrippableBreakerState(t *testing.T) {
 		t.Fatal("expected breaker to be ready after reset timeout")
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	c.Add(cb.nextBackOff + 1)
 	if !cb.Ready() {
 		t.Fatal("expected breaker to be ready after reset timeout, post failure")
@@ -192,12 +192,12 @@ func TestThresholdBreaker(t *testing.T) {
 		t.Fatal("expected threshold breaker to be open")
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	if cb.Tripped() {
 		t.Fatal("expected threshold breaker to still be open")
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	if !cb.Tripped() {
 		t.Fatal("expected threshold breaker to be tripped")
 	}
@@ -218,14 +218,14 @@ func TestConsecutiveBreaker(t *testing.T) {
 		t.Fatal("expected consecutive breaker to be open")
 	}
 
-	cb.Fail()
+	cb.Fail(nil)
 	cb.Success()
-	cb.Fail()
-	cb.Fail()
+	cb.Fail(nil)
+	cb.Fail(nil)
 	if cb.Tripped() {
 		t.Fatal("expected consecutive breaker to be open")
 	}
-	cb.Fail()
+	cb.Fail(nil)
 	if !cb.Tripped() {
 		t.Fatal("expected consecutive breaker to be tripped")
 	}
@@ -366,8 +366,8 @@ func TestRateBreakerTripping(t *testing.T) {
 	cb := NewRateBreaker(0.5, 4)
 	cb.Success()
 	cb.Success()
-	cb.Fail()
-	cb.Fail()
+	cb.Fail(nil)
+	cb.Fail(nil)
 
 	if !cb.Tripped() {
 		t.Fatal("expected rate breaker to be tripped")
@@ -380,7 +380,7 @@ func TestRateBreakerTripping(t *testing.T) {
 
 func TestRateBreakerSampleSize(t *testing.T) {
 	cb := NewRateBreaker(0.5, 100)
-	cb.Fail()
+	cb.Fail(nil)
 
 	if cb.Tripped() {
 		t.Fatal("expected rate breaker to not be tripped yet")
@@ -586,9 +586,9 @@ func TestNoDeadlockOnChannelSends(t *testing.T) {
 	wg.Wait()
 }
 
-// TestLogger ensures that the name and events get logged to the logger with at
+// TestLoggerEvents ensures that the name and events get logged to the logger at
 // the expected level.
-func TestLogger(t *testing.T) {
+func TestLoggerEvents(t *testing.T) {
 	l := &testLogger{}
 	name := "foo"
 	b := NewBreakerWithOptions(&Options{
@@ -596,16 +596,45 @@ func TestLogger(t *testing.T) {
 		Logger: l,
 	})
 	b.Reset()
-	b.Fail()
-	verifyLogCall := func(calls []logCall, idx int, expectedArgs ...interface{}) {
-		if len(calls) < idx+1 {
-			t.Errorf("expected at least %d log calls but only have %d", idx+1, len(calls))
-		} else if !reflect.DeepEqual(calls[idx].args, expectedArgs) {
-			t.Errorf("expected logging to have been called with %v, got %v", expectedArgs, calls[idx].args)
-		}
+	b.Fail(nil)
+	verifyLogCall(t, l.infoCalls, 0, name, BreakerReset)
+	verifyLogCall(t, l.debugCalls, 0, name, BreakerFail)
+}
+
+func verifyLogCall(t *testing.T, calls []logCall, idx int, expectedArgs ...interface{}) {
+	if len(calls) < idx+1 {
+		t.Errorf("expected at least %d log calls but only have %d", idx+1, len(calls))
+	} else if !reflect.DeepEqual(calls[idx].args, expectedArgs) {
+		t.Errorf("expected logging to have been called with %v, got %v", expectedArgs, calls[idx].args)
 	}
-	verifyLogCall(l.infoCalls, 0, name, BreakerReset)
-	verifyLogCall(l.debugCalls, 0, name, BreakerFail)
+}
+
+// TestLoggerCallErrors ensures that the name and events get logged to the
+// logger at the expected level.
+func TestLoggerCallErrors(t *testing.T) {
+	l := &testLogger{}
+	name := "foo"
+	tripNext := false
+	b := NewBreakerWithOptions(&Options{
+		Name:   name,
+		Logger: l,
+		ShouldTrip: func(_ *Breaker) bool {
+			if tripNext {
+				return true
+			}
+			tripNext = true
+			return false
+		},
+	})
+	failErr := fmt.Errorf("boom")
+	tripErr := fmt.Errorf("yowza")
+	b.Call(func() error { return failErr }, time.Minute)
+	b.Call(func() error { return tripErr }, time.Minute)
+	verifyLogCall(t, l.debugCalls, 0, name, BreakerFail)
+	verifyLogCall(t, l.debugCalls, 1, name, failErr)
+	verifyLogCall(t, l.debugCalls, 2, name, BreakerFail)
+	verifyLogCall(t, l.infoCalls, 0, name, tripErr)
+	verifyLogCall(t, l.infoCalls, 1, name, BreakerTripped)
 }
 
 type logCall struct {
