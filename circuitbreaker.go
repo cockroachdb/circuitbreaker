@@ -50,6 +50,8 @@ type Logger interface {
 	Infof(format string, v ...interface{})
 }
 
+//go:generate stringer -type BreakerEvent
+
 // BreakerEvent indicates the type of event received over an event channel
 type BreakerEvent int
 
@@ -308,13 +310,27 @@ func (cb *Breaker) Successes() int64 {
 // increment the failure counters and store the time of the last failure. If the
 // breaker has a TripFunc it will be called, tripping the breaker if necessary.
 func (cb *Breaker) Fail() {
+	cb.fail(nil)
+}
+
+// fail implements the logic for Fail and optionally takes an error which will
+// be used in the message passed to cb.logger if it exists. This error is
+// propagated from cb.Call(Context)?.
+func (cb *Breaker) fail(err error) {
 	cb.counts.Fail()
 	atomic.AddInt64(&cb.consecFailures, 1)
 	now := cb.Clock.Now()
 	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
 	cb.sendEvent(BreakerFail)
 	if cb.ShouldTrip != nil && cb.ShouldTrip(cb) {
+		if cb.logger != nil {
+			cb.logger.Infof("circuitbreaker: %s tripped: %v", cb.name, err)
+		}
 		cb.Trip()
+	} else {
+		if cb.logger != nil {
+			cb.logger.Debugf("circuitbreaker: %s fail (not tripped): %v", cb.name, err)
+		}
 	}
 }
 
@@ -389,7 +405,7 @@ func (cb *Breaker) CallContext(
 
 	if err != nil {
 		if ctx.Err() != context.Canceled {
-			cb.Fail()
+			cb.fail(err)
 		}
 		return err
 	}

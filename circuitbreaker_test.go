@@ -586,9 +586,9 @@ func TestNoDeadlockOnChannelSends(t *testing.T) {
 	wg.Wait()
 }
 
-// TestLogger ensures that the name and events get logged to the logger with at
+// TestLoggerEvents ensures that the name and events get logged to the logger at
 // the expected level.
-func TestLogger(t *testing.T) {
+func TestLoggerEvents(t *testing.T) {
 	l := &testLogger{}
 	name := "foo"
 	b := NewBreakerWithOptions(&Options{
@@ -597,15 +597,44 @@ func TestLogger(t *testing.T) {
 	})
 	b.Reset()
 	b.Fail()
-	verifyLogCall := func(calls []logCall, idx int, expectedArgs ...interface{}) {
-		if len(calls) < idx+1 {
-			t.Errorf("expected at least %d log calls but only have %d", idx+1, len(calls))
-		} else if !reflect.DeepEqual(calls[idx].args, expectedArgs) {
-			t.Errorf("expected logging to have been called with %v, got %v", expectedArgs, calls[idx].args)
-		}
+	verifyLogCall(t, l.infoCalls, 0, name, BreakerReset)
+	verifyLogCall(t, l.debugCalls, 0, name, BreakerFail)
+}
+
+func verifyLogCall(t *testing.T, calls []logCall, idx int, expectedArgs ...interface{}) {
+	if len(calls) < idx+1 {
+		t.Errorf("expected at least %d log calls but only have %d", idx+1, len(calls))
+	} else if !reflect.DeepEqual(calls[idx].args, expectedArgs) {
+		t.Errorf("expected logging to have been called with %v, got %v", expectedArgs, calls[idx].args)
 	}
-	verifyLogCall(l.infoCalls, 0, name, BreakerReset)
-	verifyLogCall(l.debugCalls, 0, name, BreakerFail)
+}
+
+// TestLoggerCallErrors ensures that the name and events get logged to the
+// logger at the expected level.
+func TestLoggerCallErrors(t *testing.T) {
+	l := &testLogger{}
+	name := "foo"
+	tripNext := false
+	b := NewBreakerWithOptions(&Options{
+		Name:   name,
+		Logger: l,
+		ShouldTrip: func(_ *Breaker) bool {
+			if tripNext {
+				return true
+			}
+			tripNext = true
+			return false
+		},
+	})
+	failErr := fmt.Errorf("boom")
+	tripErr := fmt.Errorf("yowza")
+	b.Call(func() error { return failErr }, time.Minute)
+	b.Call(func() error { return tripErr }, time.Minute)
+	verifyLogCall(t, l.debugCalls, 0, name, BreakerFail)
+	verifyLogCall(t, l.debugCalls, 1, name, failErr)
+	verifyLogCall(t, l.debugCalls, 2, name, BreakerFail)
+	verifyLogCall(t, l.infoCalls, 0, name, tripErr)
+	verifyLogCall(t, l.infoCalls, 1, name, BreakerTripped)
 }
 
 type logCall struct {
