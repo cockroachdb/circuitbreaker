@@ -443,10 +443,10 @@ func (cb *Breaker) logEvent(event BreakerEvent) {
 		return
 	}
 	switch event {
-	case BreakerTripped, BreakerReset, BreakerReady:
-		cb.logger.Infof("circuitbreaker: %v %v", cb.name, event)
+	case BreakerTripped, BreakerReset:
+		cb.logger.Infof("circuitbreaker: %v event: %v", cb.name, event)
 	default:
-		cb.logger.Debugf("circuitbreaker: %v %v", cb.name, event)
+		cb.logger.Debugf("circuitbreaker: %v event: %v", cb.name, event)
 	}
 }
 
