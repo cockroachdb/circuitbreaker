@@ -247,10 +247,10 @@ func (cb *Breaker) Trip() {
 // Reset will reset the circuit breaker. After Reset() is called, Tripped() will
 // return false.
 func (cb *Breaker) Reset() {
+	cb.ResetCounters()
 	atomic.StoreInt32(&cb.broken, 0)
 	atomic.StoreInt64(&cb.halfOpens, 0)
 	atomic.StoreInt32(&cb.tripped, 0)
-	cb.ResetCounters()
 	cb.sendEvent(BreakerReset)
 }
 
@@ -285,6 +285,11 @@ func (cb *Breaker) ConsecFailures() int64 {
 // Successes returns the number of successes for this circuit breaker.
 func (cb *Breaker) Successes() int64 {
 	return cb.counts.Successes()
+}
+
+// Total returns the number of total records for this circuit breaker.
+func (cb *Breaker) Total() int64 {
+	return cb.counts.Total()
 }
 
 // Fail is used to indicate a failure condition the Breaker should record. It will
@@ -455,7 +460,7 @@ func ConsecutiveTripFunc(threshold int64) TripFunc {
 // This TripFunc will not trip until there have been at least minSamples events.
 func RateTripFunc(rate float64, minSamples int64) TripFunc {
 	return func(cb *Breaker) bool {
-		samples := cb.Failures() + cb.Successes()
+		samples := cb.Total()
 		return samples >= minSamples && cb.ErrorRate() >= rate
 	}
 }

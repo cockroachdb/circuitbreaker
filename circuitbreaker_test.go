@@ -584,3 +584,22 @@ func TestNoDeadlockOnChannelSends(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func BenchmarkParallelCall(b *testing.B) {
+	cb := NewRateBreaker(0.5, 1000)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return nil }, 0)
+		}
+	})
+}
+
+func BenchmarkParallelCallFailed(b *testing.B) {
+	cb := NewRateBreaker(0.5, 1<<62)
+	err := fmt.Errorf("BenchmarkParallelCallFailed:%v", b.N)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return err }, 0)
+		}
+	})
+}
