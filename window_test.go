@@ -8,7 +8,7 @@ import (
 )
 
 func TestWindowCounts(t *testing.T) {
-	w := newWindow(time.Millisecond*10, 2)
+	w := newWindow(time.Millisecond*10, 2, clock.New())
 	w.Fail()
 	w.Fail()
 	w.Success()
@@ -38,7 +38,7 @@ func TestWindowCounts(t *testing.T) {
 func TestWindowSlides(t *testing.T) {
 	c := clock.NewMock()
 
-	w := newWindow(time.Millisecond*10, 2)
+	w := newWindow(time.Millisecond*10, 2, c)
 	w.clock = c
 	w.lastAccess = c.Now()
 

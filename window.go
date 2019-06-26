@@ -54,14 +54,12 @@ type window struct {
 // window. windowBuckets is the number of buckets the window is divided into.
 // An example: a 10 second window with 10 buckets will have 10 buckets covering
 // 1 second each.
-func newWindow(windowTime time.Duration, windowBuckets int) *window {
+func newWindow(windowTime time.Duration, windowBuckets int, clock clock.Clock) *window {
 	buckets := ring.New(windowBuckets)
 	for i := 0; i < buckets.Len(); i++ {
 		buckets.Value = &bucket{}
 		buckets = buckets.Next()
 	}
-
-	clock := clock.New()
 
 	bucketTime := time.Duration(windowTime.Nanoseconds() / int64(windowBuckets))
 	return &window{

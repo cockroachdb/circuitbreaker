@@ -158,7 +158,7 @@ func NewBreakerWithOptions(options *Options) *Breaker {
 		Clock:       options.Clock,
 		ShouldTrip:  options.ShouldTrip,
 		nextBackOff: options.BackOff.NextBackOff(),
-		counts:      newWindow(options.WindowTime, options.WindowBuckets),
+		counts:      newWindow(options.WindowTime, options.WindowBuckets, options.Clock),
 	}
 }
 
