@@ -243,6 +243,13 @@ func (cb *Breaker) RemoveListener(listener chan ListenerEvent) bool {
 // return true.
 func (cb *Breaker) Trip() {
 	// should happen before Tripped()
+	cb.backoffLock.Lock()
+	if !cb.Tripped() {
+		cb.BackOff.Reset()
+		cb.nextBackOff = cb.BackOff.NextBackOff()
+	}
+	cb.backoffLock.Unlock()
+
 	now := cb.Clock.Now()
 	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
 	atomic.StoreInt32(&cb.tripped, 1)
@@ -314,11 +321,6 @@ func (cb *Breaker) Fail() {
 // Success is used to indicate a success condition the Breaker should record. If
 // the success was triggered by a retry attempt, the breaker will be Reset().
 func (cb *Breaker) Success() {
-	cb.backoffLock.Lock()
-	cb.BackOff.Reset()
-	cb.nextBackOff = cb.BackOff.NextBackOff()
-	cb.backoffLock.Unlock()
-
 	state := cb.state()
 	if state != closed && atomic.LoadInt32(&cb.broken) != 1 {
 		cb.Reset()
