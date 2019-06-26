@@ -603,3 +603,28 @@ func BenchmarkParallelCallFailed(b *testing.B) {
 		}
 	})
 }
+
+func BenchmarkParallelCallSmooth(b *testing.B) {
+	cb := NewBreakerWithOptions(&Options{
+		ShouldTrip:    RateTripFunc(0.5, 1000),
+		SmoothLimited: 256,
+	})
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return nil }, 0)
+		}
+	})
+}
+
+func BenchmarkParallelCallFailedSmooth(b *testing.B) {
+	cb := NewBreakerWithOptions(&Options{
+		ShouldTrip:    RateTripFunc(0.5, 1<<62),
+		SmoothLimited: 256,
+	})
+	err := fmt.Errorf("BenchmarkParallelCallFailed:%v", b.N)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return err }, 0)
+		}
+	})
+}

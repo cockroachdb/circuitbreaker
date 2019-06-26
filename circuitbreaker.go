@@ -124,6 +124,10 @@ type Options struct {
 	ShouldTrip    TripFunc
 	WindowTime    time.Duration
 	WindowBuckets int
+	// SmoothLimited avoid the breaker is opened by a suddenly fault spike,
+	// e.g. network is interrupted quick flashing and recovery immediately.
+	// Keep this field zore is default disable this feature.
+	SmoothLimited int
 }
 
 // NewBreakerWithOptions creates a base breaker with a specified backoff, clock and TripFunc
@@ -158,7 +162,8 @@ func NewBreakerWithOptions(options *Options) *Breaker {
 		Clock:       options.Clock,
 		ShouldTrip:  options.ShouldTrip,
 		nextBackOff: options.BackOff.NextBackOff(),
-		counts:      newWindow(options.WindowTime, options.WindowBuckets, options.Clock),
+		counts: newWindow(options.WindowTime, options.WindowBuckets,
+			options.Clock, options.SmoothLimited),
 	}
 }
 
