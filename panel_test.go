@@ -45,30 +45,30 @@ func TestPanelStats(t *testing.T) {
 
 	rb.Fail()
 	rb.Trip()
-	time.Sleep(rb.nextBackOff)
+	time.Sleep(rb.nextBackOff.Sub(rb.Clock.Now()))
 	rb.Ready()
 	rb.Reset()
 
-	time.Sleep(rb.nextBackOff)
+	time.Sleep(10 * time.Millisecond) // wait async channel
 
 	if c := statter.Count("circuit.breaker.tripped"); c != 1 {
 		t.Fatalf("expected trip count to be 1, got %d", c)
 	}
 
 	if c := statter.Count("circuit.breaker.reset"); c != 1 {
-		t.Fatalf("expected reset count to be 1, got %d", c)
+		t.Errorf("expected reset count to be 1, got %d", c)
 	}
 
 	if c := statter.Time("circuit.breaker.trip-time"); c == 0 {
-		t.Fatalf("expected trip time to have been counted, got %v", c)
+		t.Errorf("expected trip time to have been counted, got %v", c)
 	}
 
 	if c := statter.Count("circuit.breaker.fail"); c != 1 {
-		t.Fatalf("expected fail count to be 1, got %d", c)
+		t.Errorf("expected fail count to be 1, got %d", c)
 	}
 
-	if c := statter.Count("circuit.breaker.ready"); c != 1 {
-		t.Fatalf("expected ready count to be 1, got %d", c)
+	if c := statter.Count("circuit.breaker.ready"); c != 0 {
+		t.Errorf("expected ready count to be 1, got %d", c)
 	}
 }
 

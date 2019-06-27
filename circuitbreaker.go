@@ -106,14 +106,12 @@ type Breaker struct {
 
 	_              [4]byte // pad to fix golang issue #599
 	consecFailures int64
-	lastFailure    int64 // stored as nanoseconds since the Unix epoch
-	halfOpens      int64
 	counts         *window
-	nextBackOff    time.Duration
 	tripped        int32
 	broken         int32
 	eventReceivers []chan BreakerEvent
 	listeners      []chan ListenerEvent
+	nextBackOff    time.Time
 	backoffLock    sync.Mutex
 }
 
@@ -158,10 +156,9 @@ func NewBreakerWithOptions(options *Options) *Breaker {
 	}
 
 	return &Breaker{
-		BackOff:     options.BackOff,
-		Clock:       options.Clock,
-		ShouldTrip:  options.ShouldTrip,
-		nextBackOff: options.BackOff.NextBackOff(),
+		BackOff:    options.BackOff,
+		Clock:      options.Clock,
+		ShouldTrip: options.ShouldTrip,
 		counts: newWindow(options.WindowTime, options.WindowBuckets,
 			options.Clock, options.SmoothLimited),
 	}
@@ -239,19 +236,24 @@ func (cb *Breaker) RemoveListener(listener chan ListenerEvent) bool {
 	return false
 }
 
+func (cb *Breaker) nextBackOffLocked() {
+	if o := cb.BackOff.NextBackOff(); o != backoff.Stop {
+		cb.nextBackOff = cb.Clock.Now().Add(o)
+	} else {
+		cb.nextBackOff = time.Time{}
+	}
+}
+
 // Trip will trip the circuit breaker. After Trip() is called, Tripped() will
 // return true.
 func (cb *Breaker) Trip() {
 	// should happen before Tripped()
-	cb.backoffLock.Lock()
 	if !cb.Tripped() {
+		cb.backoffLock.Lock()
 		cb.BackOff.Reset()
-		cb.nextBackOff = cb.BackOff.NextBackOff()
+		cb.nextBackOffLocked()
+		cb.backoffLock.Unlock()
 	}
-	cb.backoffLock.Unlock()
-
-	now := cb.Clock.Now()
-	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
 	atomic.StoreInt32(&cb.tripped, 1)
 	cb.sendEvent(BreakerTripped)
 }
@@ -261,7 +263,6 @@ func (cb *Breaker) Trip() {
 func (cb *Breaker) Reset() {
 	cb.ResetCounters()
 	atomic.StoreInt32(&cb.broken, 0)
-	atomic.StoreInt64(&cb.halfOpens, 0)
 	atomic.StoreInt32(&cb.tripped, 0)
 	cb.sendEvent(BreakerReset)
 }
@@ -310,10 +311,8 @@ func (cb *Breaker) Total() int64 {
 func (cb *Breaker) Fail() {
 	cb.counts.Fail()
 	atomic.AddInt64(&cb.consecFailures, 1)
-	now := cb.Clock.Now()
-	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
 	cb.sendEvent(BreakerFail)
-	if cb.ShouldTrip != nil && cb.ShouldTrip(cb) {
+	if !cb.Tripped() && cb.ShouldTrip != nil && cb.ShouldTrip(cb) {
 		cb.Trip()
 	}
 }
@@ -321,8 +320,7 @@ func (cb *Breaker) Fail() {
 // Success is used to indicate a success condition the Breaker should record. If
 // the success was triggered by a retry attempt, the breaker will be Reset().
 func (cb *Breaker) Success() {
-	state := cb.state()
-	if state != closed && atomic.LoadInt32(&cb.broken) != 1 {
+	if cb.Tripped() && atomic.LoadInt32(&cb.broken) != 1 {
 		cb.Reset()
 	}
 	atomic.StoreInt64(&cb.consecFailures, 0)
@@ -339,12 +337,15 @@ func (cb *Breaker) ErrorRate() float64 {
 // It will be ready if the breaker is in a reset state, or if it is time to retry
 // the call for auto resetting.
 func (cb *Breaker) Ready() bool {
-	state := cb.state()
+	return cb.state(false) != open
+}
+
+func (cb *Breaker) ready() bool {
+	state := cb.state(true)
 	if state == halfopen {
-		atomic.StoreInt64(&cb.halfOpens, 0)
 		cb.sendEvent(BreakerReady)
 	}
-	return state == closed || state == halfopen
+	return state != open
 }
 
 // Call wraps a function the Breaker will protect. A failure is recorded
@@ -361,7 +362,7 @@ func (cb *Breaker) CallContext(
 ) error {
 	var err error
 
-	if !cb.Ready() {
+	if !cb.ready() {
 		return ErrBreakerOpen
 	}
 
@@ -397,25 +398,23 @@ func (cb *Breaker) CallContext(
 // closed - the circuit is in a reset state and is operational
 // open - the circuit is in a tripped state
 // halfopen - the circuit is in a tripped state but the reset timeout has passed
-func (cb *Breaker) state() state {
+func (cb *Breaker) state(once bool) state {
 	tripped := cb.Tripped()
 	if tripped {
 		if atomic.LoadInt32(&cb.broken) == 1 {
 			return open
 		}
 
-		last := atomic.LoadInt64(&cb.lastFailure)
-		since := cb.Clock.Now().Sub(time.Unix(0, last))
+		now := cb.Clock.Now()
 
 		cb.backoffLock.Lock()
 		defer cb.backoffLock.Unlock()
 
-		if cb.nextBackOff != backoff.Stop && since > cb.nextBackOff {
-			if atomic.CompareAndSwapInt64(&cb.halfOpens, 0, 1) {
-				cb.nextBackOff = cb.BackOff.NextBackOff()
-				return halfopen
+		if !cb.nextBackOff.IsZero() && now.After(cb.nextBackOff) {
+			if once {
+				cb.nextBackOffLocked()
 			}
-			return open
+			return halfopen
 		}
 		return open
 	}
