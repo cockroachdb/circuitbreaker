@@ -257,9 +257,9 @@ func (cb *Breaker) RemoveListener(listener chan ListenerEvent) bool {
 // Trip will trip the circuit breaker. After Trip() is called, Tripped() will
 // return true.
 func (cb *Breaker) Trip() {
-	atomic.StoreInt32(&cb.tripped, 1)
 	now := cb.Clock.Now()
 	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
+	atomic.StoreInt32(&cb.tripped, 1)
 	cb.sendEvent(BreakerTripped)
 }
 
@@ -267,8 +267,8 @@ func (cb *Breaker) Trip() {
 // return false.
 func (cb *Breaker) Reset() {
 	atomic.StoreInt32(&cb.broken, 0)
-	atomic.StoreInt32(&cb.tripped, 0)
 	atomic.StoreInt64(&cb.halfOpens, 0)
+	atomic.StoreInt32(&cb.tripped, 0)
 	cb.ResetCounters()
 	cb.sendEvent(BreakerReset)
 }
@@ -338,7 +338,7 @@ func (cb *Breaker) Success() {
 	cb.backoffLock.Unlock()
 
 	state := cb.state()
-	if state != closed {
+	if state != closed && atomic.LoadInt32(&cb.broken) != 1 {
 		cb.Reset()
 	}
 	atomic.StoreInt64(&cb.consecFailures, 0)
