@@ -237,7 +237,6 @@ func (cb *Breaker) RemoveListener(listener chan ListenerEvent) bool {
 // Trip will trip the circuit breaker. After Trip() is called, Tripped() will
 // return true.
 func (cb *Breaker) Trip() {
-	// should happen before Tripped()
 	now := cb.Clock.Now()
 	atomic.StoreInt64(&cb.lastFailure, now.UnixNano())
 	atomic.StoreInt32(&cb.tripped, 1)
