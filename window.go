@@ -1,8 +1,8 @@
 package circuit
 
 import (
-	"container/ring"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/facebookgo/clock"
@@ -20,22 +20,32 @@ var (
 type bucket struct {
 	failure int64
 	success int64
+	limited int64
 }
 
 // Reset resets the counts to 0
 func (b *bucket) Reset() {
-	b.failure = 0
-	b.success = 0
+	atomic.StoreInt64(&b.failure, 0)
+	atomic.StoreInt64(&b.success, 0)
 }
 
 // Fail increments the failure count
 func (b *bucket) Fail() {
-	b.failure++
+	limited := b.limited
+	if limited <= 0 {
+		atomic.AddInt64(&b.failure, 1)
+	} else {
+		f := atomic.LoadInt64(&b.failure)
+		if f >= limited {
+			return
+		}
+		atomic.AddInt64(&b.failure, 1)
+	}
 }
 
 // Sucecss increments the success count
 func (b *bucket) Success() {
-	b.success++
+	atomic.AddInt64(&b.success, 1)
 }
 
 // window maintains a ring of buckets and increments the failure and success
@@ -43,32 +53,31 @@ func (b *bucket) Success() {
 // advance to the next bucket, reseting its counts. This allows the keeping of
 // rolling statistics on the counts.
 type window struct {
-	buckets    *ring.Ring
-	bucketTime time.Duration
-	bucketLock sync.RWMutex
-	lastAccess time.Time
-	clock      clock.Clock
+	buckets       []bucket
+	bucketTime    time.Duration
+	smoothLimited int64
+	bucketLock    sync.Mutex
+	lastAccess    time.Time
+	lastIdx       uint64
+	clock         clock.Clock
 }
 
 // newWindow creates a new window. windowTime is the time covering the entire
 // window. windowBuckets is the number of buckets the window is divided into.
 // An example: a 10 second window with 10 buckets will have 10 buckets covering
 // 1 second each.
-func newWindow(windowTime time.Duration, windowBuckets int) *window {
-	buckets := ring.New(windowBuckets)
-	for i := 0; i < buckets.Len(); i++ {
-		buckets.Value = &bucket{}
-		buckets = buckets.Next()
+func newWindow(windowTime time.Duration, windowBuckets int, clock clock.Clock, smooth int) *window {
+	buckets := make([]bucket, windowBuckets)
+	for i := 0; i < len(buckets); i++ {
+		buckets[i].limited = int64(smooth)
 	}
-
-	clock := clock.New()
-
 	bucketTime := time.Duration(windowTime.Nanoseconds() / int64(windowBuckets))
 	return &window{
-		buckets:    buckets,
-		bucketTime: bucketTime,
-		clock:      clock,
-		lastAccess: clock.Now(),
+		buckets:       buckets,
+		bucketTime:    bucketTime,
+		smoothLimited: int64(smooth),
+		clock:         clock,
+		lastAccess:    clock.Now(),
 	}
 }
 
@@ -84,35 +93,38 @@ func (w *window) Fail() {
 func (w *window) Success() {
 	w.bucketLock.Lock()
 	b := w.getLatestBucket()
-	b.Success()
 	w.bucketLock.Unlock()
+	b.Success()
 }
 
 // Failures returns the total number of failures recorded in all buckets.
 func (w *window) Failures() int64 {
-	w.bucketLock.RLock()
-
 	var failures int64
-	w.buckets.Do(func(x interface{}) {
-		b := x.(*bucket)
-		failures += b.failure
-	})
-
-	w.bucketLock.RUnlock()
+	for i := 0; i < len(w.buckets); i++ {
+		b := &w.buckets[i]
+		failures += atomic.LoadInt64(&b.failure)
+	}
 	return failures
 }
 
 // Successes returns the total number of successes recorded in all buckets.
 func (w *window) Successes() int64 {
-	w.bucketLock.RLock()
-
 	var successes int64
-	w.buckets.Do(func(x interface{}) {
-		b := x.(*bucket)
-		successes += b.success
-	})
-	w.bucketLock.RUnlock()
+	for i := 0; i < len(w.buckets); i++ {
+		b := &w.buckets[i]
+		successes += atomic.LoadInt64(&b.success)
+	}
 	return successes
+}
+
+// Successes returns the total number of all recorded in all buckets.
+func (w *window) Total() int64 {
+	var total int64
+	for i := 0; i < len(w.buckets); i++ {
+		b := &w.buckets[i]
+		total += atomic.LoadInt64(&b.success) + atomic.LoadInt64(&b.failure)
+	}
+	return total
 }
 
 // ErrorRate returns the error rate calculated over all buckets, expressed as
@@ -121,14 +133,13 @@ func (w *window) ErrorRate() float64 {
 	var total int64
 	var failures int64
 
-	w.bucketLock.RLock()
-	w.buckets.Do(func(x interface{}) {
-		b := x.(*bucket)
-		total += b.failure + b.success
-		failures += b.failure
-	})
-	w.bucketLock.RUnlock()
+	for i := 0; i < len(w.buckets); i++ {
+		b := &w.buckets[i]
+		total += atomic.LoadInt64(&b.success)
+		failures += atomic.LoadInt64(&b.failure)
+	}
 
+	total += failures
 	if total == 0 {
 		return 0.0
 	}
@@ -138,12 +149,9 @@ func (w *window) ErrorRate() float64 {
 
 // Reset resets the count of all buckets.
 func (w *window) Reset() {
-	w.bucketLock.Lock()
-
-	w.buckets.Do(func(x interface{}) {
-		x.(*bucket).Reset()
-	})
-	w.bucketLock.Unlock()
+	for i := 0; i < len(w.buckets); i++ {
+		w.buckets[i].Reset()
+	}
 }
 
 // getLatestBucket returns the current bucket. If the bucket time has elapsed
@@ -151,16 +159,30 @@ func (w *window) Reset() {
 // access time before returning it. getLatestBucket assumes that the caller has
 // locked the bucketLock
 func (w *window) getLatestBucket() *bucket {
-	var b *bucket
-	b = w.buckets.Value.(*bucket)
-	elapsed := w.clock.Now().Sub(w.lastAccess)
+	n := len(w.buckets)
+	b := &w.buckets[w.lastIdx%uint64(n)]
+	now := w.clock.Now()
+	elapsed := now.Sub(w.lastAccess)
 
 	if elapsed > w.bucketTime {
 		// Reset the buckets between now and number of buckets ago. If
 		// that is more that the existing buckets, reset all.
-		for i := 0; i < w.buckets.Len(); i++ {
-			w.buckets = w.buckets.Next()
-			b = w.buckets.Value.(*bucket)
+		for i := 0; i < n; i++ {
+			o := b
+			w.lastIdx++
+			b = &w.buckets[w.lastIdx%uint64(n)]
+			if w.smoothLimited > 0 {
+				limited := o.limited
+				f := atomic.LoadInt64(&o.failure)
+				if f >= limited {
+					b.limited = limited * 2
+				} else if limited = limited / 2; f < limited {
+					if limited < w.smoothLimited {
+						limited = w.smoothLimited
+					}
+					b.limited = limited
+				}
+			}
 			b.Reset()
 			elapsed = time.Duration(int64(elapsed) - int64(w.bucketTime))
 			if elapsed < w.bucketTime {
@@ -168,7 +190,7 @@ func (w *window) getLatestBucket() *bucket {
 				break
 			}
 		}
-		w.lastAccess = w.clock.Now()
+		w.lastAccess = now
 	}
 	return b
 }

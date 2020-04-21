@@ -85,10 +85,13 @@ func TestBreakerEvents(t *testing.T) {
 		t.Fatalf("expected to receive a trip event, got %d", e)
 	}
 
-	c.Add(cb.nextBackOff + 1)
-	cb.Ready()
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
+	cb.Call(func() error { return context.Canceled }, 0)
 	if e := <-events; e != BreakerReady {
 		t.Fatalf("expected to receive a breaker ready event, got %d", e)
+	}
+	if e := <-events; e != BreakerFail {
+		t.Fatalf("expected to receive a fail event, got %d", e)
 	}
 
 	cb.Reset()
@@ -114,10 +117,13 @@ func TestAddRemoveListener(t *testing.T) {
 		t.Fatalf("expected to receive a trip event, got %v", e)
 	}
 
-	c.Add(cb.nextBackOff + 1)
-	cb.Ready()
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
+	cb.Call(func() error { return context.Canceled }, 0)
 	if e := <-events; e.Event != BreakerReady {
 		t.Fatalf("expected to receive a breaker ready event, got %v", e)
+	}
+	if e := <-events; e.Event != BreakerFail {
+		t.Fatalf("expected to receive a fail event, got %v", e)
 	}
 
 	cb.Reset()
@@ -153,13 +159,13 @@ func TestTrippableBreakerState(t *testing.T) {
 	if cb.Ready() {
 		t.Fatal("expected breaker to not be ready")
 	}
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 	if !cb.Ready() {
 		t.Fatal("expected breaker to be ready after reset timeout")
 	}
 
 	cb.Fail()
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 	if !cb.Ready() {
 		t.Fatal("expected breaker to be ready after reset timeout, post failure")
 	}
@@ -170,7 +176,7 @@ func TestTrippableBreakerManualBreak(t *testing.T) {
 	cb := NewBreaker()
 	cb.Clock = c
 	cb.Break()
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 
 	if cb.Ready() {
 		t.Fatal("expected breaker to still be tripped")
@@ -178,7 +184,7 @@ func TestTrippableBreakerManualBreak(t *testing.T) {
 
 	cb.Reset()
 	cb.Trip()
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 	if !cb.Ready() {
 		t.Fatal("expected breaker to be ready")
 	}
@@ -310,7 +316,7 @@ func TestThresholdBreakerResets(t *testing.T) {
 		t.Fatal("Expected cb to return an error")
 	}
 
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 	for i := 0; i < 4; i++ {
 		err = cb.Call(circuit, 0)
 		if err != nil {
@@ -420,7 +426,7 @@ func TestRateBreakerResets(t *testing.T) {
 		t.Fatal("Expected cb to return open open breaker error (open breaker)")
 	}
 
-	c.Add(cb.nextBackOff + 1)
+	c.Add(cb.nextBackOff.Sub(c.Now()) + 1)
 	err = cb.Call(circuit, 0)
 	if err != nil {
 		t.Fatal("Expected cb to be successful")
@@ -497,9 +503,47 @@ func TestNeverRetryAfterBackoffStops(t *testing.T) {
 
 // TestPartialSecondBackoff ensures that the breaker event less than nextBackoff value
 // time after tripping the breaker isn't allowed.
+func TestHalfOpen(t *testing.T) {
+	c := clock.NewMock()
+	cb := NewBreakerWithOptions(&Options{
+		BackOff: backoff.NewConstantBackOff(500 * time.Millisecond),
+		Clock:   c,
+	})
+
+	// Set the time to 0.5 seconds after the epoch, then trip the breaker.
+	c.Add(500 * time.Millisecond)
+	cb.Trip()
+
+	var (
+		wg         sync.WaitGroup
+		halfopened int64
+	)
+
+	c.Add(600 * time.Millisecond)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			cb.Call(func() error {
+				atomic.AddInt64(&halfopened, 1)
+				return context.Canceled
+			}, 0)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+	if n := atomic.LoadInt64(&halfopened); n != 1 {
+		t.Fatalf("only allow one call passed when it enter halfopen, got %v", n)
+	}
+}
+
+// TestPartialSecondBackoff ensures that the breaker event less than nextBackoff value
+// time after tripping the breaker isn't allowed.
 func TestPartialSecondBackoff(t *testing.T) {
 	c := clock.NewMock()
-	cb := NewBreaker()
+	cb := NewBreakerWithOptions(&Options{
+		BackOff: backoff.NewConstantBackOff(500 * time.Millisecond),
+	})
 	cb.Clock = c
 
 	// Set the time to 0.5 seconds after the epoch, then trip the breaker.
@@ -509,8 +553,8 @@ func TestPartialSecondBackoff(t *testing.T) {
 	// Move forward 100 milliseconds in time and ensure that the backoff time
 	// is set to a larger number than the clock advanced.
 	c.Add(100 * time.Millisecond)
-	cb.nextBackOff = 500 * time.Millisecond
 	if cb.Ready() {
+		fmt.Println(cb.nextBackOff, c.Now())
 		t.Fatalf("expected breaker not to be ready after less time than nextBackoff had passed")
 	}
 
@@ -583,4 +627,48 @@ func TestNoDeadlockOnChannelSends(t *testing.T) {
 		go tripAndReset()
 	}
 	wg.Wait()
+}
+
+func BenchmarkParallelCall(b *testing.B) {
+	cb := NewRateBreaker(0.5, 1000)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return nil }, 0)
+		}
+	})
+}
+
+func BenchmarkParallelCallFailed(b *testing.B) {
+	cb := NewRateBreaker(0.5, 1<<62)
+	err := fmt.Errorf("BenchmarkParallelCallFailed:%v", b.N)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return err }, 0)
+		}
+	})
+}
+
+func BenchmarkParallelCallSmooth(b *testing.B) {
+	cb := NewBreakerWithOptions(&Options{
+		ShouldTrip:    RateTripFunc(0.5, 1000),
+		SmoothLimited: 256,
+	})
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return nil }, 0)
+		}
+	})
+}
+
+func BenchmarkParallelCallFailedSmooth(b *testing.B) {
+	cb := NewBreakerWithOptions(&Options{
+		ShouldTrip:    RateTripFunc(0.5, 1<<62),
+		SmoothLimited: 256,
+	})
+	err := fmt.Errorf("BenchmarkParallelCallFailed:%v", b.N)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			cb.Call(func() error { return err }, 0)
+		}
+	})
 }
